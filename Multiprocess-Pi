@@ -1,0 +1,185 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
+#include <curand.h>
+#include <curand_kernel.h>
+
+
+
+#define Threads 1000		// Pretty number of threads to fit the total size
+#define totalSize 10000000	// Size of file given
+
+
+__global__ void freqCount(char*, int*);	// Function to compute my histogram
+__global__ void dummyCall();	// function to warm up the GPUs
+
+int main(int argc, char *argv[]) {
+
+	clock_t start, end;	// To keep track of the execution time of the program
+	double total_time;	// Variable to store the total time of the execution
+
+	start = clock();	// Starting the Clock
+
+
+	//-------- Error handling ------------------------------------------------------------//
+
+	if (argc != 2) {
+		printf("\n Number of arguments is incorrect.\n");
+		exit(0);
+	}
+
+	FILE *in = fopen(argv[1], "r+");
+	FILE *out = fopen("freq.dat", "w+");
+	if (in == NULL) {
+		printf("Could not open the input file \n");
+		exit(1);
+	}
+	if (out == NULL) {
+		printf("Could not create a file for storing output\n");
+		exit(1);
+	}
+
+	//------------------------------------------------------------------------------------//
+	//Setting up two streams for the GPU devices	
+	cudaStream_t stream1;
+	cudaStream_t stream2;
+	
+	cudaSetDevice(0);
+	cudaStreamCreate(&stream1);
+	
+	cudaSetDevice(1);
+	cudaStreamCreate(&stream2); 
+
+	//-------------------------------------------------------------
+
+	char* inputSt1;		// Pointers used later to read in chunks of data
+	char* inputSt2; 
+
+	char *dev_inputSt1;	// Pointers used to allocate space on GPUs
+	char *dev_inputSt2;
+
+	int* hist;		// Array to hold Histogram data array for host
+	int *dev_hist1;		// Array to hold Histogram data for device1
+	int *dev_hist2;		// Array to hold Histogram data for device2
+
+	int hist2[10] = {0};
+	 
+
+	cudaHostAlloc((void**) &inputSt1, sizeof(char) * totalSize, cudaHostAllocDefault);	// Allocate space on host prt 1
+	cudaHostAlloc((void**) &inputSt2, sizeof(char) * totalSize, cudaHostAllocDefault);	// Allocate space on host prt 2 
+	cudaHostAlloc((void**) &hist, sizeof(int) * 10, cudaHostAllocDefault);			// Allocate space on host for storing Hist data
+
+	for (int i = 0; i < 10; i++) {	// Initialize both hist arrays to zero
+		hist[i] = 0;
+		hist2[i] = 0;
+	}
+
+	cudaSetDevice(0);		// Ready the device!
+		
+	dummyCall<<<1, 1>>>();		// Warm up the device!
+
+	cudaMalloc((void**)&dev_inputSt1, sizeof(char) * totalSize);		// Allocate space on the device for the string 1
+	cudaMalloc((void**)&dev_hist1, sizeof(int) * 10);			// Allocate space on the device for array of hist data
+	cudaMemcpy(dev_hist1, hist, 10 * sizeof(int), cudaMemcpyHostToDevice);	// Copy initialized hist into device
+
+	cudaSetDevice(1);		// Ready the next device!
+
+	dummyCall<<<1, 1>>>();		// Warm up next device!
+
+	cudaMalloc((void**)&dev_inputSt2, sizeof(char) * totalSize);		// Allocate space on the 2nd device for the string 2
+	cudaMalloc((void**)&dev_hist2, sizeof(int) * 10);			// Allocate space on the 2nd device for array of hist data
+	cudaMemcpy(dev_hist2, hist, 10 * sizeof(int), cudaMemcpyHostToDevice);	// Copy initialized hist2 into device
+
+
+	
+	int hist3[12] = {0};
+	fgets(inputSt1, 12, in); // Want to read in first 12 to catch "\0", Will add back later
+	for (int i = 0; i < 11; i++) {
+		hist3[inputSt1[i] - '0']++;
+	}
+
+	
+	int sync_count = 1;
+
+	while(fgets(inputSt1, totalSize, in) != NULL) // While you can still fetch things from the txt file
+	{
+
+		cudaSetDevice(0);							// Ready the device! (Warmed up)
+
+		cudaMemcpyAsync(dev_inputSt1, inputSt1, totalSize * sizeof(char), cudaMemcpyHostToDevice, stream1);	// Async Memcpy for stream 1 with String1
+		freqCount<<<(int)ceil(totalSize / Threads) + 1, Threads, 0, stream1>>>(dev_inputSt1, dev_hist1);	// Kernel call to count frequencies and store in Hist
+		
+		if (fgets(inputSt2, totalSize, in) != NULL) {				// Through clever scheduling, while kernel call in stream1 occurs, input will be read into stream2
+
+			cudaSetDevice(1);						// Ready the 2nd Device! (Warmed up)
+
+			cudaMemcpyAsync(dev_inputSt2, inputSt2, totalSize * sizeof(char), cudaMemcpyHostToDevice, stream2);	// Async Memcpy for stream 2 with String2
+			freqCount<<<(int)ceil(totalSize / Threads) + 1, Threads, 0, stream2>>>(dev_inputSt2, dev_hist2);	// Kernel call to count frequencies and store in Hist
+		}
+		
+		cudaDeviceSynchronize();						// Make sure everyone is done doing their work before moving on
+		
+		printf("GPUs Synch (%i)\n", sync_count);					// counting each iteration and synchronation 
+		sync_count++;
+		
+	}
+
+
+	cudaSetDevice(0);	// Focus on device0!
+	cudaMemcpy(hist, dev_hist1, 10 * sizeof(int), cudaMemcpyDeviceToHost);	// Get back the data from stream1
+
+	cudaSetDevice(1);	// Focus on device1!
+	cudaMemcpy(hist2, dev_hist2, 10 * sizeof(int), cudaMemcpyDeviceToHost);	// Get back the data from stream2
+
+	printf("\n") ;
+	for (int i = 0; i < 10; i++) {
+		int total = hist[i] + hist2[i] + hist3[i];
+		printf("The number [%i] had count: %i\t Normalized Frequency: %f\n", i, total, (double)total/(double)100000001);
+		fprintf(out, "%i\t%f\n", i, (double)total/(double)100000001);
+	}
+
+
+	//--------------End of work------------------------------------------------------------------------------------//
+
+	//Stop the clock
+	end = clock();
+	total_time = ((double) (end - start)) / CLOCKS_PER_SEC;
+
+	printf("\nTotal Time to Execute: %f\n", total_time);
+
+
+	// Destroy everything >:) Clean it all up
+	cudaStreamDestroy(stream1);
+	cudaStreamDestroy(stream2);
+
+	// Close everything, shut door behind you
+	fclose(in);
+	fclose(out);
+	
+	cudaFree(dev_inputSt1);
+	cudaFree(dev_inputSt2);
+	cudaFree(dev_hist1);
+	cudaFree(dev_hist2);
+
+}
+__global__ void dummyCall(){
+	int i = 1; 
+	if (i != 1) {
+	}
+}
+
+__global__ void freqCount(char* input, int* hist) {
+
+	int globalID = blockDim.x * blockIdx.x + threadIdx.x;
+
+	if (globalID >= totalSize) {
+		return;
+	}
+
+	if (input[globalID] == '\0')
+		return;
+
+	// Slow but works
+	atomicAdd(&hist[input[globalID] - '0'], 1);
+}
