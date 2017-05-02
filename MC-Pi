@@ -1,0 +1,191 @@
+//Project 3 
+//Kelly Roudebush
+
+#include<stdio.h>
+#include<stdlib.h>
+#include<math.h>
+#include<time.h>
+//cuRand host and device header files
+#include<curand.h>
+#include<curand_kernel.h>
+
+#define N 768
+
+// kernel to initialize the random states
+__global__ void init(unsigned int seed, curandState_t* states) {
+
+	// Need to know which thread we are currently working with, so: location -> threadIdx.x	
+	int location = blockDim.x*blockIdx.x + threadIdx.x ;
+
+	curand_init(seed, location, 0, &states[location]) ;
+	// seed---------same seed for each core sent from host
+	// location--sequence number; different for each core
+	// 0------------offset
+}
+
+//kernel to calculate random numbers
+__global__ void randoms (curandState_t* states, int* count, int* numTrials, int* intX, int* intY) {
+
+// Need to know which thread we are currently working with, so: location -> threadIdx.x	
+
+int location = blockDim.x*blockIdx.x + threadIdx.x ;
+	
+float x = curand_uniform(&states[location]) ;	// Assign rand value for x and y to get random position 
+
+float y = curand_uniform(&states[location]) ;
+
+intX[location] = (int)floor(x*10);	// normalize the x and y values and store on an array that corresponds to
+
+intY[location] = (int)floor(y*10);	// each thread using location
+
+float hits = (x - 1.0)*(x - 1.0) + (y - 1.0)*(y - 1.0);	// Compute if the position (x,y) is inside the circle
+
+	if(hits <= 1.0) {
+	count[location] = 1 ;	// If yes, store a 1 in the count array. 
+}else{				// Array will record how many successfulc(inside the circle) positions are found
+		count[location] = 0;
+	}
+}	
+
+int main (int argc, char ** argv) {
+	
+// Error Checking
+	
+if (argc != 2)	// Check number of commands
+{
+	printf("An error has occured with command line arguments") ;
+	return(-1) ;
+}
+
+FILE *fp = fopen("freq.dat", "w+");
+if (fp == NULL) // Check if file exists and can be opened
+{
+	printf("ERROR!!! File could not be opened!\n");
+	exit(1);
+}
+
+int numTrials ;	// Number of Trials or "stones" you want to throw at a patch of land with a "pond"
+
+numTrials = atoi(argv[1]) ;	// Commandline string input converted to 
+int
+
+if(numTrials <0)	// Check to make sure input is not a silly number
+{
+	printf("You can't have negative number of trials!\n") ;
+	exit(0) ;
+}
+
+//----------------------------------------------------------------------
+
+//Seeding and warming up curand_unit	
+
+curandState_t* statesForDev ;// keep track of seed vaue for every thread
+
+cudaMalloc((void**) &statesForDev, 
+
+numTrials*sizeof(curandState_t)) ;//allocate space on GPU for randstates
+
+init<<<(int)ceil(numTrials/N)+1,N>>>(time(NULL), statesForDev) ;// initialize all of the random states on the GPU
+
+// *** +1 for the Kernel Call to have enough strings! (Biggest issue from Lab2) ***
+
+
+//-----------------------------------------------------------------
+
+// allocate array of unsigned ints on CPU and GPU
+// float cpu_nums[numTrials] ;
+
+
+// Dynamically allocate b/c could have HUGE numTrials
+int* count = (int *)malloc(numTrials * sizeof(int)); // Array to track (x,y) inside circle
+
+int* intX = (int *)malloc(numTrials * sizeof(int)) ; // Array to hold Normalized X values (ints)
+
+int* intY = (int *)malloc(numTrials * sizeof(int)) ; // Array to hold Normalized Y values (ints)
+
+int* dev_Trials,*dev_count,*dev_intX,*dev_intY ; ;	// Pointers for the Device 
+
+
+cudaMalloc((void**) &dev_Trials, numTrials*sizeof(int)) ; // Allocate space at each device pointer for array of
+
+cudaMalloc((void**) &dev_count, numTrials*sizeof(int)) ;  // size numTrials*sizeof(int). 
+
+cudaMalloc((void**) &dev_intX, numTrials*sizeof(int)) ;
+
+cudaMalloc((void**) &dev_intY, numTrials*sizeof(int)) ;
+
+
+cudaMemcpy(dev_Trials, &numTrials,sizeof(int),cudaMemcpyHostToDevice) ; // Copy the input number of Trials to device
+
+
+// Kernel Call! 
+randoms<<<(int)ceil(numTrials/N) + 1, N>>>(statesForDev,dev_count,dev_Trials,dev_intX, dev_intY);
+
+
+cudaThreadSynchronize() ; // Make sure all strings have finished before moving on
+
+//randoms<<<1,numTrials>>>(states, Dev_nums) ;
+//cudaMemcpy(cpu_nums, dev_nums, trials*sizeof(float), 
+
+cudaMemcpyDeviceToHost) ;
+
+// Copy back arrays from GPU to CPU so that we can compute final output
+cudaMemcpy(count,dev_count,numTrials*sizeof(int),cudaMemcpyDeviceToHost);
+
+cudaMemcpy(intX,dev_intX,numTrials*sizeof(int),cudaMemcpyDeviceToHost);
+
+cudaMemcpy(intY,dev_intY,numTrials*sizeof(int),cudaMemcpyDeviceToHost);
+
+	
+//float* dev_nums2 ;
+//cudaMalloc((void**) &dev_nums2, numTrials*sizeof(float)) ;
+
+	
+/*
+for (int i = 0; i < N; i++) {
+	printf("%f\n", cpu_nums[i] ;
+}
+*/
+
+//----------------------------------------------------------------------
+
+
+// Calculting Number of Successes (stones that make it into the pond)
+int b ;
+int totalCount = 0;
+for (b = 0; b < numTrials; b++) {
+	if (count[b] == 1){
+		 totalCount = totalCount + count[b];
+	}
+}
+
+// What is the approximation of pi?
+float pi ;
+pi = ((float)totalCount/(float)numTrials)*4.0 ; // Multiple by four for four quadrants of space
+
+printf("# of trials = %d, estimate of pi is %g \n",numTrials,pi) ;
+	
+
+// Tracking frequencies (just like c code)
+int a;
+int hist[10] = {0} ;	// Use Array to hold number frequencies of positions
+for(a=0;a<numTrials;a++){
+	hist[intX[a]]++ ;
+	hist[intY[a]]++ ;
+}	
+
+// Place findings in freq.dat file
+for(a = 0;a < 10; a++){
+	fprintf(fp, "%0.1f\t%i\n", a * 0.1, hist[a]) ;
+}
+
+// Just because...cleaning
+cudaFree(statesForDev) ;
+cudaFree(dev_Trials) ;
+cudaFree(dev_count) ;
+cudaFree(dev_intX) ;
+cudaFree(dev_intY) ;
+
+fclose(fp) ;
+return 0; 
+}
